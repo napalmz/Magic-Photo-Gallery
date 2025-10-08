@@ -14,7 +14,7 @@ Just simply use my [docker image](https://github.com/napalmz/httpd-base), as sho
 First, move to your image directory and download the app:
 
 ```
-wget https://github.com/napalmz/Magic-Photo-Gallery/index.php
+wget https://raw.githubusercontent.com/napalmz/Magic-Photo-Gallery/main/index.php
 ```
 
 Then, spinup a docker container (using compose):
