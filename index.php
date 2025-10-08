@@ -1,10 +1,13 @@
 <?php
 // === CONFIGURAZIONE ===
-$baseDir = __DIR__;                              // cartella principale
-$configDir = $baseDir ."/.Magic-Photo-Gallery";  // cartella per tutti i file generati da questo script
+$baseDir    = __DIR__;                              // cartella principale
+$configDir  = $baseDir ."/.Magic-Photo-Gallery";  // cartella per tutti i file generati da questo script
 $configFile = $configDir . '/.config.json';      // file di configurazione
 $thumbsRoot = $configDir . '/.thumbs';           // base, per retrocompatibilità
-$prefThumb = '.tbn_';                            // prefisso per file thumbnail
+$prefThumb  = '.tbn_';                            // prefisso per file thumbnail
+
+// Nome del file script corrente (senza path). Evita hardcoding.
+$self = basename($_SERVER['SCRIPT_NAME'] ?? 'index.php');
 
 // Configurazione di default
 $defaults = [
@@ -80,7 +83,7 @@ if (session_status() !== PHP_SESSION_ACTIVE) { @session_start(); }
 $SESSION_KEY = 'mpg_auth';
 if (isset($_GET['logout'])) {
     unset($_SESSION[$SESSION_KEY]);
-    header('Location: index2.php'); exit;
+    header('Location: ' . $self); exit;
 }
 function auth_ok() {
     global $cfg, $SESSION_KEY;
@@ -193,7 +196,7 @@ if (!auth_ok()) {
     // Se è stato inviato il form, prova il login
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pass'])) {
         if (try_login($_POST['pass'])) {
-            header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?')); exit;
+            header('Location: ' . $self); exit;
         }
         $err = 'Password errata';
     }
@@ -608,17 +611,18 @@ button { all:unset; }
 <script>
   window.__GALLERY_CFG__ = <?php echo json_encode($cfg, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
   window.__CUR_DIR__ = <?php echo json_encode($relDir, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
+  window.__SELF__ = <?php echo json_encode($self, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
 </script>
 <header>
   <?php
     $crumbs = [];
     $acc = '';
-    $crumbs[] = '<a href="index2.php" style="color:inherit;text-decoration:none;">'.htmlspecialchars($cfg['title'],ENT_QUOTES).'</a>';
+    $crumbs[] = '<a href="'.$self.'" style="color:inherit;text-decoration:none;">'.htmlspecialchars($cfg['title'],ENT_QUOTES).'</a>';
     if (!$isRoot) {
       foreach (explode('/', $relDir) as $seg) {
         $acc = ltrim($acc . '/' . $seg, '/');
         if (is_excluded_dir($seg, $acc)) break;
-        $crumbs[] = '<a href="index2.php?dir='.rawurlencode($acc).'" style="color:inherit;text-decoration:none;">'.htmlspecialchars($seg,ENT_QUOTES).'</a>';
+        $crumbs[] = '<a href="'.$self.'?dir='.rawurlencode($acc).'" style="color:inherit;text-decoration:none;">'.htmlspecialchars($seg,ENT_QUOTES).'</a>';
       }
     }
     echo implode(' / ', $crumbs);
@@ -637,7 +641,7 @@ button { all:unset; }
   <h3 style="margin:6px 0 8px 0; font-size:14px; font-weight:600;">Cartelle</h3>
   <div class="grid" id="folders">
     <?php foreach ($subdirs as $sd): ?>
-      <a class="card" href="index2.php?dir=<?php echo rawurlencode($sd['rel']); ?>" data-rel="<?php echo htmlspecialchars($sd['rel'],ENT_QUOTES); ?>" style="display:block; text-decoration:none; color:inherit;">
+      <a class="card" href="<?php echo htmlspecialchars($self,ENT_QUOTES); ?>?dir=<?php echo rawurlencode($sd['rel']); ?>" data-rel="<?php echo htmlspecialchars($sd['rel'],ENT_QUOTES); ?>" style="display:block; text-decoration:none; color:inherit;">
         <img
           src="<?php echo $sd['gif'] ? htmlspecialchars($sd['gif'],ENT_QUOTES) : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='; ?>"
           alt="<?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?>"
@@ -706,7 +710,7 @@ button { all:unset; }
     e.preventDefault();
     const pwd = prompt('Inserisci la nuova password da trasformare in hash (non verrà salvata automaticamente):');
     if (!pwd) return;
-    fetch(withDir(`index2.php?mkhash=${encodeURIComponent(pwd)}`), { cache:'no-store' })
+    fetch(withDir(`${window.__SELF__}?mkhash=${encodeURIComponent(pwd)}`), { cache:'no-store' })
       .then(r=>r.json())
       .then(d=>{
         if (d && d.ok && d.hash) {
@@ -736,7 +740,7 @@ button { all:unset; }
     if (!fig) return;
     if (e.altKey) {
       const img = fig.querySelector('img');
-      fetch(withDir(`index2.php?diag=${encodeURIComponent(img.dataset.name)}`), {cache:'no-store'})
+      fetch(withDir(`${window.__SELF__}?diag=${encodeURIComponent(img.dataset.name)}`), {cache:'no-store'})
         .then(r=>r.json()).then(d=>console.table(d));
       e.preventDefault(); return;
     }
@@ -760,7 +764,7 @@ button { all:unset; }
     fimgs.forEach(img => {
       if (img.dataset.gif && img.dataset.gif.length) return; // già pronto
       const rel = img.closest('a.card').dataset.rel || '';
-      fetch(withDir(`index2.php?make_gif=${encodeURIComponent(rel)}`), { cache:'no-store' })
+      fetch(withDir(`${window.__SELF__}?make_gif=${encodeURIComponent(rel)}`), { cache:'no-store' })
         .then(r=>r.json())
         .then(d=>{ if (d && d.ok && d.gif) { img.src = d.gif; } })
         .catch(()=>{});
@@ -781,7 +785,7 @@ button { all:unset; }
     if (active >= CONCURRENCY) return;
     const job = queue.shift();
     active++;
-    fetch(withDir(`index2.php?make_thumb=${encodeURIComponent(job.name)}`), { cache: 'no-store' })
+    fetch(withDir(`${window.__SELF__}?make_thumb=${encodeURIComponent(job.name)}`), { cache: 'no-store' })
       .then(r => r.json())
       .then(data => {
         if (data && data.ok && data.thumb) {
