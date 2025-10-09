@@ -1,10 +1,11 @@
 <?php
 // === CONFIGURAZIONE ===
-$baseDir    = __DIR__;                              // cartella principale
-$configDir  = $baseDir ."/.Magic-Photo-Gallery";  // cartella per tutti i file generati da questo script
-$configFile = $configDir . '/.config.json';      // file di configurazione
-$thumbsRoot = $configDir . '/.thumbs';           // base, per retrocompatibilità
-$prefThumb  = '.tbn_';                            // prefisso per file thumbnail
+$baseDir    = __DIR__;                                            // cartella principale
+$configName = ".Magic-Photo-Gallery";                             // nome della cartella di configurazione
+$configDir  = $baseDir . DIRECTORY_SEPARATOR . $configName;       // path per tutti i file generati da questo script
+$configFile = $configDir . DIRECTORY_SEPARATOR . '.config.json';  // file di configurazione
+$thumbsRoot = $configDir . DIRECTORY_SEPARATOR . '.thumbs';       // path per le miniature
+$prefThumb  = '.tbn_';                                            // prefisso per file thumbnail
 
 // Nome del file script corrente (senza path). Evita hardcoding.
 $self = basename($_SERVER['SCRIPT_NAME'] ?? 'index.php');
@@ -21,7 +22,7 @@ $defaults = [
     'bg_dark'       => '#111111',
     'fg_dark'       => '#eeeeee',
     // Cartelle da escludere
-    'exclude_dirs'  => [ '.Magic-Photo-Gallery', 'log', 'logs' ],  // ulteriori cartelle da escludere
+    'exclude_dirs'  => [ $configName, 'log', 'logs' ],  // ulteriori cartelle da escludere
     // Login alla pagina
     'auth_enabled'  => false,
     'auth_password' => ''   // può essere testo in chiaro o password_hash() ($2y$...)
@@ -120,7 +121,20 @@ function img_dims($path) {
     return $s ? ['w'=>$s[0]??0,'h'=>$s[1]??0,'mime'=>$s['mime']??''] : null;
 }
 function rel($abs) {
-  return str_replace(getcwd() . DIRECTORY_SEPARATOR, '', $abs);
+    // Converte un path assoluto del filesystem in path URL relativo alla directory dello script
+    $abs = str_replace('\\', '/', $abs);
+    $baseFs = str_replace('\\', '/', realpath($GLOBALS['baseDir']));
+    $baseUrl = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/');
+    if (strpos($abs, $baseFs) === 0) {
+        $suffix = ltrim(substr($abs, strlen($baseFs)), '/');
+        // Se lo script è in root, non aggiungere doppio slash
+        if ($baseUrl === '' || $baseUrl === '/') {
+            return '/' . $suffix;
+        }
+        return $baseUrl . '/' . $suffix;
+    }
+    // Fallback: basename come ultima risorsa
+    return '/' . basename($abs);
 }
 
 // Nome file thumbnail con prefisso nascosto
@@ -229,6 +243,22 @@ if (!auth_ok()) {
 // === PREPARAZIONE CARTELLE ===
 if (!is_dir($configDir)) { @mkdir($configDir, 0755, true); }
 if (!is_dir($thumbsRoot)) { @mkdir($thumbsRoot, 0755, true); }
+// Proteggi i file sensibili nella cartella di configurazione
+$htaccessPath = $configDir . '/.htaccess';
+if (!file_exists($htaccessPath)) {
+    $ht = <<<HTA
+# Blocca accesso diretto a file sensibili
+<Files ".config.json">
+  Require all denied
+</Files>
+<Files ".debug.log">
+  Require all denied
+</Files>
+# Niente listing
+Options -Indexes
+HTA;
+    @file_put_contents($htaccessPath, $ht);
+}
 
 // Flag estensione EXIF
 $EXIF_AVAILABLE = extension_loaded('exif') || function_exists('exif_read_data');
@@ -608,8 +638,13 @@ button { all:unset; }
 </style>
 </head>
 <body>
+<?php
+  // Config pubblica per il client: non includere segreti
+  $publicCfg = $cfg;
+  unset($publicCfg['auth_password']);   // rimuovi password/hash
+?>
 <script>
-  window.__GALLERY_CFG__ = <?php echo json_encode($cfg, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
+  window.__GALLERY_CFG__ = <?php echo json_encode($publicCfg, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
   window.__CUR_DIR__ = <?php echo json_encode($relDir, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
   window.__SELF__ = <?php echo json_encode($self, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
 </script>
