@@ -24,8 +24,8 @@ $defaults = [
     'fg_dark'       => '#eeeeee',
     // Cartelle da escludere
     'exclude_dirs'  => [ $configName, 'log', 'logs' ],  // ulteriori cartelle da escludere
-    // Login alla pagina
-    'auth_enabled'  => false,
+    // Modalità autenticazione: 0=nessun login, 1=login solo per funzioni extra, 2=login per tutto
+    'auth_mode'     => 0,
     'auth_password' => ''   // può essere testo in chiaro o password_hash() ($2y$...)
 ];
 // Carica o crea .config.json
@@ -55,10 +55,14 @@ if (is_file($configFile)) {
 } else {
     @file_put_contents($configFile, json_encode($defaults, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
 }
-// Sanitizza
 $cfg['title'] = (string)$cfg['title'];
 $cfg['thumb_make'] = max(32, (int)$cfg['thumb_make']);
 $cfg['thumb_view'] = max(48, (int)$cfg['thumb_view']);
+// Backward-compatibilità: se esiste 'auth_enabled' nel file di config, mappa a auth_mode (true->2, false->0) solo se 'auth_mode' non è definito
+if (!array_key_exists('auth_mode', $cfg) && array_key_exists('auth_enabled', $cfg)) {
+    $cfg['auth_mode'] = !empty($cfg['auth_enabled']) ? 2 : 0;
+}
+// Sanitizza
 foreach (['bg_light','fg_light','bg_dark','fg_dark'] as $k) {
     if (!preg_match('/^#([0-9a-f]{3}|[0-9a-f]{6})$/i', (string)$cfg[$k])) {
         $cfg[$k] = $defaults[$k];
@@ -77,11 +81,17 @@ $cfg['exclude_dirs'] = $ex;
 $cfg['debugFlag'] = !empty($cfg['debugFlag']);
 $debugFlag = $cfg['debugFlag'];
 // Auth
-$cfg['auth_enabled'] = (bool)$cfg['auth_enabled'];
+$cfg['auth_mode'] = isset($cfg['auth_mode']) ? (int)$cfg['auth_mode'] : 0;
+if ($cfg['auth_mode'] < 0 || $cfg['auth_mode'] > 2) { $cfg['auth_mode'] = 0; }
 $cfg['auth_password'] = isset($cfg['auth_password']) ? (string)$cfg['auth_password'] : '';
 
 // === SESSIONE E AUTENTICAZIONE SEMPLICE ===
 if (session_status() !== PHP_SESSION_ACTIVE) { @session_start(); }
+if (empty($_SESSION['csrf'])) {
+    try { $_SESSION['csrf'] = bin2hex(random_bytes(16)); }
+    catch (Throwable $e) { $_SESSION['csrf'] = bin2hex(openssl_random_pseudo_bytes(16)); }
+}
+$CSRF_TOKEN = $_SESSION['csrf'];
 $SESSION_KEY = 'mpg_auth';
 if (isset($_GET['logout'])) {
     unset($_SESSION[$SESSION_KEY]);
@@ -89,7 +99,8 @@ if (isset($_GET['logout'])) {
 }
 function auth_ok() {
     global $cfg, $SESSION_KEY;
-    if (empty($cfg['auth_enabled'])) return true;
+    if (!isset($cfg['auth_mode'])) return true;
+    if ((int)$cfg['auth_mode'] === 0) return true;
     return !empty($_SESSION[$SESSION_KEY]);
 }
 function try_login($pass) {
@@ -224,15 +235,27 @@ function is_excluded_dir($entryName, $relativePath = '') {
 // === ENDPOINT: genera hash per password ===
 if (isset($_GET['mkhash'])) {
     header('Content-Type: application/json; charset=utf-8');
-    if (!auth_ok()) { http_response_code(401); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
+    if ((int)$cfg['auth_mode'] === 0 || !auth_ok()) { http_response_code(401); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
     $plain = (string)($_GET['mkhash'] ?? '');
     if ($plain === '') { echo json_encode(['ok'=>false,'error'=>'empty']); exit; }
     $hash = password_hash($plain, PASSWORD_DEFAULT);
     echo json_encode(['ok'=>true,'hash'=>$hash], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
     exit;
 }
+
+/* === ENDPOINT: login via AJAX (auth_mode >= 1) === */
+if (isset($_GET['do_login'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    if ((int)$cfg['auth_mode'] === 0) { http_response_code(404); echo json_encode(['ok'=>false]); exit; }
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') { http_response_code(405); echo json_encode(['ok'=>false,'error'=>'method_not_allowed']); exit; }
+    $payload = json_decode(file_get_contents('php://input'), true) ?: [];
+    $pass = (string)($payload['pass'] ?? '');
+    if ($pass === '') { http_response_code(400); echo json_encode(['ok'=>false,'error'=>'empty']); exit; }
+    if (try_login($pass)) { echo json_encode(['ok'=>true]); exit; }
+    http_response_code(401); echo json_encode(['ok'=>false,'error'=>'bad_password']); exit;
+}
 // === LOGIN GATE ===
-if (!auth_ok()) {
+if ((int)$cfg['auth_mode'] === 2 && !auth_ok()) {
     // Se è stato inviato il form, prova il login
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pass'])) {
         if (try_login($_POST['pass'])) {
@@ -698,11 +721,25 @@ if (isset($_GET['purge_cache'])) {
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
-    if (!auth_ok()) { http_response_code(401); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
+
+    // Solo POST
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') { http_response_code(405); echo json_encode(['ok'=>false,'error'=>'method_not_allowed']); exit; }
+
+    // Se auth_mode >=1 richiede login e CSRF valido; se 0 non richiede auth
+    if ((int)$cfg['auth_mode'] >= 1) {
+        if (!auth_ok()) { http_response_code(401); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
+        $payload = json_decode(file_get_contents('php://input'), true) ?: [];
+        $csrf = (string)($payload['csrf'] ?? '');
+        if (!isset($_SESSION['csrf']) || !hash_equals($_SESSION['csrf'], $csrf)) {
+            http_response_code(403); echo json_encode(['ok'=>false,'error'=>'forbidden']); exit;
+        }
+    } else {
+        $payload = json_decode(file_get_contents('php://input'), true) ?: [];
+    }
 
     $targetRel = trim(str_replace(['\\'],'/', ltrim($_GET['dir'] ?? $relDir, '/')));
     if (strpos($targetRel,'..') !== false) { echo json_encode(['ok'=>false,'error'=>'bad_rel']); exit; }
-    $recursive = !empty($_GET['recursive']);
+    $recursive = !empty($payload['recursive']);
     $purged = ['thumbs'=>0,'gifs'=>0,'dirs'=>0];
 
     $purgeOne = function($rel) use ($thumbsRoot, $prefThumb, $folderGifName, &$purged) {
@@ -841,7 +878,7 @@ $pageTitle = $isRoot ? $cfg['title'] : basename($relDir);
 <title><?php echo htmlspecialchars($pageTitle, ENT_QUOTES); ?></title>
 <style>
 :root {
-  --gap: 12px;
+  --gap: 3px;
   --thumb-size: <?php echo (int)$cfg['thumb_view']; ?>px;
   --bg: <?php echo htmlspecialchars($cfg['bg_light'], ENT_QUOTES); ?>;
   --fg: <?php echo htmlspecialchars($cfg['fg_light'], ENT_QUOTES); ?>;
@@ -859,9 +896,24 @@ header { padding: 12px 16px; font-weight: 600; }
 .crumbs a { color: inherit; text-decoration: none; }
 .crumbs { font-weight:600; display:flex; align-items:center; gap:6px; }
 .crumbs .sep { opacity:.6; }
-.grid { display: grid; gap: var(--gap); padding: var(--gap);
-  grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size), 1fr)); }
-.card { position: relative; border-radius: 10px; overflow: hidden; background: rgba(0,0,0,.2); cursor:pointer;
+.grid {
+  display: grid;
+  gap: var(--gap);
+  padding: var(--gap);
+  /*grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size), 1fr));*/
+  grid-template-columns: repeat(auto-fill, minmax(calc(var(--thumb-size) * 1), 1fr));
+}
+#grid {
+  gap: 2px;
+  padding: 2px;
+}
+.card {
+  position: relative;
+  border-radius: 5px;
+  overflow: hidden;
+  background: rgba(0,0,0,.2);
+  margin: var(--gap);
+  cursor:pointer;
   aspect-ratio: 1 / 1; /* celle quadrate e uniformi */
   content-visibility: auto; contain-intrinsic-size: var(--thumb-size) var(--thumb-size);
 }
@@ -906,6 +958,40 @@ header { padding: 12px 16px; font-weight: 600; }
   text-shadow:0 1px 2px rgba(0,0,0,.85);
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
+
+/* Folder cards: darken background and subtly blur GIF to make text stand out */
+#folders .card::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  background:rgba(0,0,0,.35);
+  z-index:1; /* sits above image, below text */
+}
+
+#folders .card img{
+  filter: blur(1.5px) brightness(0.78);
+  -webkit-filter: blur(1.5px) brightness(0.78);
+}
+
+@media (prefers-reduced-motion: reduce){
+  #folders .card img{
+    filter: brightness(0.78);
+    -webkit-filter: brightness(0.78);
+  }
+}
+
+/* Disable scale hover on folder GIFs */
+#folders .card:hover img{ transform:none; }
+
+/* Folder title: larger and centered, with stronger backdrop */
+#folders .card .name{
+  z-index:2;
+  text-align:center;
+  font-size:15px;
+  font-weight:700;
+  padding:8px 10px;
+  background:linear-gradient(to top, rgba(0,0,0,.75), rgba(0,0,0,.25));
+}
 /* Lightbox */
 .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.92);
   display:none; align-items:center; justify-content:center; z-index:9999; }
@@ -935,6 +1021,8 @@ button { all:unset; }
   window.__GALLERY_CFG__ = <?php echo json_encode($publicCfg, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
   window.__CUR_DIR__ = <?php echo json_encode($relDir, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
   window.__SELF__ = <?php echo json_encode($self, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
+  window.__AUTH_MODE__ = <?php echo (int)$cfg['auth_mode']; ?>;
+  window.__CSRF__ = <?php echo json_encode($CSRF_TOKEN, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
 </script>
 <header>
   <div class="hdr">
@@ -953,10 +1041,14 @@ button { all:unset; }
     </nav>
     <div class="title"><?php echo htmlspecialchars($cfg['title'],ENT_QUOTES); ?></div>
     <span style="display:flex; gap:12px; margin-left:auto; align-items:center;">
-      <a href="#" id="purgeBtn" style="color:inherit;" title="Elimina anteprime e GIF della cartella corrente">Pulisci cache</a>
-      <?php if (!empty($cfg['auth_enabled'])): ?>
+      <?php if ((int)$cfg['auth_mode'] === 0): ?>
+        <a href="#" id="purgeBtn" style="color:inherit;" title="Elimina anteprime e GIF della cartella corrente">Pulisci cache</a>
+      <?php elseif ((int)$cfg['auth_mode'] >= 1 && auth_ok()): ?>
+        <a href="#" id="purgeBtn" style="color:inherit;" title="Elimina anteprime e GIF della cartella corrente">Pulisci cache</a>
         <a href="#" id="mkHash" style="color:inherit;">Crea hash</a>
         <a href="?logout=1" style="color:inherit;">Esci</a>
+      <?php elseif ((int)$cfg['auth_mode'] >= 1 && !auth_ok()): ?>
+        <a href="#" id="btnLogin" style="color:inherit;">Accedi</a>
       <?php endif; ?>
     </span>
   </div>
@@ -1040,15 +1132,26 @@ button { all:unset; }
       ? 'Eliminare TUTTE le anteprime e GIF di TUTTE le cartelle?'
       : 'Eliminare le anteprime e la GIF della cartella corrente?';
     if (!confirm(msg)) return;
-    const url = withDir(`${window.__SELF__}?purge_cache=1${isRoot ? '&recursive=1' : ''}&t=${Date.now()}`);
-    fetch(url, {cache:'no-store'})
-      .then(r=>r.json())
-      .then(d=>{
-        if (d && d.ok) {
-          alert(`Cache pulita.\nCartelle toccate: ${d.purged.dirs}\nThumbs: ${d.purged.thumbs}\nGIF: ${d.purged.gifs}`);
-          location.reload();
-        } else alert('Errore nella pulizia cache');
-      }).catch(()=>alert('Errore nella pulizia cache'));
+
+    const url = withDir(`${window.__SELF__}?purge_cache=1&t=${Date.now()}`);
+    const body = { recursive: isRoot ? 1 : 0 };
+    if ((window.__AUTH_MODE__ || 0) >= 1) { body.csrf = window.__CSRF__ || ''; }
+
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify(body)
+    })
+    .then(r=>r.json())
+    .then(d=>{
+      if (d && d.ok) {
+        alert(`Cache pulita.\nCartelle toccate: ${d.purged.dirs}\nThumbs: ${d.purged.thumbs}\nGIF: ${d.purged.gifs}`);
+        location.reload();
+      } else {
+        alert('Errore nella pulizia cache');
+      }
+    }).catch(()=>alert('Errore nella pulizia cache'));
   });
 
   // Collassa/espandi “Cartelle”
@@ -1074,6 +1177,25 @@ button { all:unset; }
     if (!d) return url;
     return url + (url.includes('?') ? '&' : '?') + 'dir=' + encodeURIComponent(d);
   }
+
+  // Handler Login (auth_mode >= 1)
+  const loginBtn = document.getElementById('btnLogin');
+  loginBtn?.addEventListener('click', (e)=>{
+    e.preventDefault();
+    const pwd = prompt('Inserisci la password per le funzioni extra:');
+    if (!pwd) return;
+    fetch(`${window.__SELF__}?do_login=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pass: pwd })
+    })
+    .then(r=>r.json())
+    .then(d=>{
+      if (d && d.ok) { location.reload(); }
+      else { alert('Accesso negato'); }
+    })
+    .catch(()=>alert('Errore di autenticazione'));
+  });
 
   // Handler Crea hash
   const mkHashLink = document.getElementById('mkHash');
