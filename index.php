@@ -675,8 +675,8 @@ header { padding: 12px 16px; font-weight: 600; }
   content-visibility: auto; contain-intrinsic-size: var(--thumb-size) var(--thumb-size);
 }
 .progress {
-  position:absolute; inset:auto 6px 6px 6px;
-  height:6px; background:rgba(255,255,255,.25); border-radius:999px; overflow:hidden;
+  position:absolute; inset:6px 6px auto 6px; /* in alto, non sovrapposta al nome */
+  height:8px; background:rgba(255,255,255,.25); border-radius:999px; overflow:hidden;
   display:none;
 }
 .progress > span {
@@ -684,7 +684,13 @@ header { padding: 12px 16px; font-weight: 600; }
   background:rgba(255,255,255,.9);
   transition:width .2s ease;
 }
+.pct {
+  position:absolute; top:6px; right:10px;
+  font-size:11px; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.85);
+  display:none;
+}
 .card.loading .progress { display:block; }
+.card.loading .pct { display:block; }
 .card.loading .name { opacity:.85; }
 .card img { display:block; width:100%; height:100%; object-fit:cover; transition:transform .2s ease; background: transparent; }
 .card:hover img { transform: scale(1.03); }
@@ -760,6 +766,7 @@ button { all:unset; }
           loading="lazy" decoding="async">
         <div class="name" title="<?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?>"><?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?></div>
         <div class="progress"><span></span></div>
+        <div class="pct">0%</div>
       </a>
     <?php endforeach; ?>
   </div>
@@ -876,26 +883,32 @@ button { all:unset; }
     const pollers = new Map(); // rel -> interval id
 
     function startPoll(rel, card) {
-      // evita doppi poll
       if (pollers.has(rel)) return;
       const bar = card.querySelector('.progress > span');
+      const pct = card.querySelector('.pct');
       card.classList.add('loading');
+      // reset UI
+      if (bar) bar.style.width = '1%';
+      if (pct) pct.textContent = '0%';
+
       const iv = setInterval(() => {
         fetch(withDir(`${window.__SELF__}?gif_progress=${encodeURIComponent(rel)}`), { cache:'no-store' })
-          .then(r=>r.json())
+          .then(r=>r.ok ? r.json() : null)
           .then(d=>{
             if (!d || !d.ok) return;
-            if (d.exists && d.total > 0) {
-              const perc = Math.max(0, Math.min(100, Math.round((d.done / d.total)*100)));
-              if (bar) bar.style.width = perc + '%';
-              // quando completo, fermiamo il poller ma lasciamo che il fetch make_gif imposti la GIF
-              if (d.done >= d.total) {
+            if (!d.exists) return; // progress file non ancora creato
+            const total = d.total || 0, done = d.done || 0;
+            if (total > 0) {
+              const perc = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+              if (bar) bar.style.width = (perc || 1) + '%';
+              if (pct) pct.textContent = perc + '%';
+              if (done >= total) {
                 clearInterval(iv); pollers.delete(rel);
-                setTimeout(()=>{ card.classList.remove('loading'); }, 400);
+                // non rimuovere subito; lascia che il fetch make_gif imposti la GIF
               }
             }
           }).catch(()=>{});
-      }, 400);
+      }, 350);
       pollers.set(rel, iv);
     }
 
@@ -916,9 +929,20 @@ button { all:unset; }
           // ferma il poller se ancora attivo
           const iv = pollers.get(rel);
           if (iv) { clearInterval(iv); pollers.delete(rel); }
-          card.classList.remove('loading');
           const bar = card.querySelector('.progress > span'); if (bar) bar.style.width = '100%';
-          setTimeout(()=>{ const p = card.querySelector('.progress'); if (p) p.style.display='none'; }, 800);
+          const pct = card.querySelector('.pct'); if (pct) pct.textContent = '100%';
+          // mostra subito la gif se disponibile (anche se il then non l'ha impostata per cache/temporanei)
+          const img = card.querySelector('img');
+          if (img && (!img.src || img.src.startsWith('data:'))) {
+            // prova a caricare la gif direttamente
+            fetch(withDir(`${window.__SELF__}?gif_progress=${encodeURIComponent(rel)}`), { cache:'no-store' })
+              .finally(()=>{
+                // rimuovi overlay dopo un attimo
+                setTimeout(()=>{ card.classList.remove('loading'); }, 300);
+              });
+          } else {
+            setTimeout(()=>{ card.classList.remove('loading'); }, 300);
+          }
         });
     });
   }
