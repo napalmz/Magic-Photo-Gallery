@@ -180,6 +180,12 @@ if (!is_dir($thumbDirForView)) { @mkdir($thumbDirForView, 0755, true); }
 // GIF di anteprima per cartelle: salviamo come .folder.gif dentro la cartella thumbs corrispondente
 $folderGifName = $prefThumb . 'folder.gif';
 
+// Progress file per GIF cartella
+function folder_gif_progress_path($dirRel, $thumbsRoot, $prefThumb) {
+    $base = ($dirRel === '' ? $thumbsRoot : ($thumbsRoot . '/' . $dirRel));
+    return $base . '/' . $prefThumb . 'folder.progress.json';
+}
+
 // helper: verifica se una cartella va esclusa
 function is_excluded_dir($entryName, $relativePath = '') {
     global $cfg;
@@ -432,12 +438,23 @@ function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
 }
 
 // === FUNZIONE: GIF animata di cartella (Imagick) ===
-function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $delayCs = 8) {
+function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $delayCs = 8, $progressPath = null) {
     // Raccogli immagini (solo primo livello della cartella)
     $files = glob($srcDirAbs . '/*.{jpg,jpeg,JPG,JPEG,png,PNG}', GLOB_BRACE) ?: [];
     natsort($files);
     $files = array_values($files);
     if (empty($files)) return false;
+
+    $total = min($maxFrames, count($files));
+    if ($progressPath) {
+        $td = dirname($progressPath);
+        if (!is_dir($td)) @mkdir($td, 0755, true);
+        @file_put_contents($progressPath, json_encode([
+            'total' => $total,
+            'done'  => 0,
+            'started_at' => time()
+        ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+    }
 
     // Se non c'è Imagick, usa un PNG/JPEG statico del primo file convertito a GIF
     if (!class_exists('Imagick')) {
@@ -448,7 +465,15 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
         if (!is_dir($td)) @mkdir($td, 0755, true);
         if (!create_thumb($first, $tmpJpg, $frameSize, true)) return false;
         // copia come gif "finta"
-        return @copy($tmpJpg, $gifPath);
+        $ok = @copy($tmpJpg, $gifPath);
+        if ($progressPath) {
+            @file_put_contents($progressPath, json_encode([
+                'total' => 1,
+                'done'  => 1,
+                'done_at' => time()
+            ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+        }
+        return $ok;
     }
 
     $td = dirname($gifPath);
@@ -472,13 +497,41 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
             $im->addImage($frame);
             $im->setImageDispose(Imagick::DISPOSE_BACKGROUND);
             $count++;
+            if ($progressPath) {
+                @file_put_contents($progressPath, json_encode([
+                    'total' => $total,
+                    'done'  => $count
+                ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+            }
         } catch (Exception $e) { continue; }
     }
     if ($count === 0) { return false; }
     $im = $im->coalesceImages();
     $ok = $im->writeImages($gifPath, true);
     $im->clear();
+    if ($progressPath) {
+        @file_put_contents($progressPath, json_encode([
+            'total' => $total,
+            'done'  => $count,
+            'done_at' => time()
+        ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+    }
     return $ok;
+}
+
+// === ENDPOINT: stato avanzamento GIF cartella ===
+if (isset($_GET['gif_progress'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    if (!auth_ok()) { http_response_code(401); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
+    $dirRel = trim(str_replace(['\\'],'/', ltrim($_GET['gif_progress'],'/')));
+    if (strpos($dirRel,'..') !== false) { echo json_encode(['ok'=>false]); exit; }
+    $ppath = folder_gif_progress_path($dirRel, $thumbsRoot, $prefThumb);
+    if (!is_file($ppath)) { echo json_encode(['ok'=>true,'exists'=>false,'total'=>0,'done'=>0]); exit; }
+    $data = @json_decode(@file_get_contents($ppath), true) ?: [];
+    $total = isset($data['total']) ? (int)$data['total'] : 0;
+    $done  = isset($data['done'])  ? (int)$data['done']  : 0;
+    echo json_encode(['ok'=>true,'exists'=>true,'total'=>$total,'done'=>$done], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 // === ENDPOINT ASINCRONO: genera GIF anteprima cartella ===
@@ -496,7 +549,8 @@ if (isset($_GET['make_gif'])) {
         if (is_excluded_dir($last, $dirRel)) { echo json_encode(['ok'=>false,'error'=>'excluded']); exit; }
     }
     $gifAbs = ($dirRel === '' ? ($thumbsRoot . '/' . $folderGifName) : ($thumbsRoot . '/' . $dirRel . '/' . $folderGifName));
-    $ok = create_folder_gif($srcAbs, $gifAbs, max(96, (int)$cfg['thumb_view']));
+    $progressPath = folder_gif_progress_path($dirRel, $thumbsRoot, $prefThumb);
+    $ok = create_folder_gif($srcAbs, $gifAbs, max(96, (int)$cfg['thumb_view']), 12, 8, $progressPath);
     echo json_encode([
         'ok' => (bool)$ok,
         'gif' => $ok ? rel($gifAbs) . '?v=' . time() : null
@@ -620,6 +674,18 @@ header { padding: 12px 16px; font-weight: 600; }
   aspect-ratio: 1 / 1; /* celle quadrate e uniformi */
   content-visibility: auto; contain-intrinsic-size: var(--thumb-size) var(--thumb-size);
 }
+.progress {
+  position:absolute; inset:auto 6px 6px 6px;
+  height:6px; background:rgba(255,255,255,.25); border-radius:999px; overflow:hidden;
+  display:none;
+}
+.progress > span {
+  display:block; height:100%; width:0%;
+  background:rgba(255,255,255,.9);
+  transition:width .2s ease;
+}
+.card.loading .progress { display:block; }
+.card.loading .name { opacity:.85; }
 .card img { display:block; width:100%; height:100%; object-fit:cover; transition:transform .2s ease; background: transparent; }
 .card:hover img { transform: scale(1.03); }
 .name{
@@ -693,6 +759,7 @@ button { all:unset; }
           data-gif="<?php echo htmlspecialchars($sd['gif'] ?? '',ENT_QUOTES); ?>"
           loading="lazy" decoding="async">
         <div class="name" title="<?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?>"><?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?></div>
+        <div class="progress"><span></span></div>
       </a>
     <?php endforeach; ?>
   </div>
@@ -805,14 +872,54 @@ button { all:unset; }
 
   // === Generazione asincrona GIF per cartelle ===
   if (folders) {
-    const fimgs = Array.from(folders.querySelectorAll('a.card img'));
-    fimgs.forEach(img => {
+    const cards = Array.from(folders.querySelectorAll('a.card'));
+    const pollers = new Map(); // rel -> interval id
+
+    function startPoll(rel, card) {
+      // evita doppi poll
+      if (pollers.has(rel)) return;
+      const bar = card.querySelector('.progress > span');
+      card.classList.add('loading');
+      const iv = setInterval(() => {
+        fetch(withDir(`${window.__SELF__}?gif_progress=${encodeURIComponent(rel)}`), { cache:'no-store' })
+          .then(r=>r.json())
+          .then(d=>{
+            if (!d || !d.ok) return;
+            if (d.exists && d.total > 0) {
+              const perc = Math.max(0, Math.min(100, Math.round((d.done / d.total)*100)));
+              if (bar) bar.style.width = perc + '%';
+              // quando completo, fermiamo il poller ma lasciamo che il fetch make_gif imposti la GIF
+              if (d.done >= d.total) {
+                clearInterval(iv); pollers.delete(rel);
+                setTimeout(()=>{ card.classList.remove('loading'); }, 400);
+              }
+            }
+          }).catch(()=>{});
+      }, 400);
+      pollers.set(rel, iv);
+    }
+
+    cards.forEach(card => {
+      const img = card.querySelector('img');
+      const rel = card.dataset.rel || '';
       if (img.dataset.gif && img.dataset.gif.length) return; // già pronto
-      const rel = img.closest('a.card').dataset.rel || '';
+      startPoll(rel, card);
       fetch(withDir(`${window.__SELF__}?make_gif=${encodeURIComponent(rel)}`), { cache:'no-store' })
         .then(r=>r.json())
-        .then(d=>{ if (d && d.ok && d.gif) { img.src = d.gif; } })
-        .catch(()=>{});
+        .then(d=>{
+          if (d && d.ok && d.gif) {
+            img.src = d.gif;
+          }
+        })
+        .catch(()=>{})
+        .finally(()=>{
+          // ferma il poller se ancora attivo
+          const iv = pollers.get(rel);
+          if (iv) { clearInterval(iv); pollers.delete(rel); }
+          card.classList.remove('loading');
+          const bar = card.querySelector('.progress > span'); if (bar) bar.style.width = '100%';
+          setTimeout(()=>{ const p = card.querySelector('.progress'); if (p) p.style.display='none'; }, 800);
+        });
     });
   }
 
