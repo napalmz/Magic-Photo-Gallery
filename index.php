@@ -765,7 +765,7 @@ button { all:unset; }
 <header>
   <div class="hdr">
     <nav class="crumbs" aria-label="Breadcrumb">
-      <a href="<?php echo htmlspecialchars($self,ENT_QUOTES); ?>" title="Home">🏠</a>
+      <a href="<?php echo htmlspecialchars($self,ENT_QUOTES); ?>" title="Home">🏠 Home</a>
       <?php
         if (!$isRoot) {
           $acc = '';
@@ -787,22 +787,6 @@ button { all:unset; }
     <span></span>
     <?php endif; ?>
   </div>
-  <?php
-    $foldersCount = count($subdirs);
-    $imagesCount  = count($items);
-    if ($foldersCount > 0) {
-      echo '<div style="margin-top:6px; font-size:12px; opacity:.8; display:flex; gap:16px;">';
-      echo '<span>'.$foldersCount.' cartella'.($foldersCount===1?'':'e').'</span>';
-      if ($imagesCount > 0) {
-        echo '<span>Foto: '.$imagesCount.'</span>';
-      }
-      echo '</div>';
-    } else {
-      if ($imagesCount > 0) {
-        echo '<div style="margin-top:6px; font-size:12px; opacity:.8;">Foto: '.$imagesCount.'</div>';
-      }
-    }
-  ?>
 </header>
 
 <?php if (!empty($subdirs)): ?>
@@ -827,7 +811,7 @@ button { all:unset; }
 
 <?php if (empty($items) && empty($subdirs)): ?>
 <p style="padding:16px">Nessuna immagine trovata.</p>
-<?php else: ?>
+<?php elseif (!empty($items)): ?>
 <h3 style="margin:6px 0 0 0; padding:0 var(--gap); font-size:14px; font-weight:600;">Foto<?php if (count($items)>0) echo ' ('.count($items).')'; ?></h3>
 <main class="grid" id="grid">
 <?php foreach ($items as $idx => $it): ?>
