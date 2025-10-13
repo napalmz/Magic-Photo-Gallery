@@ -583,13 +583,15 @@ foreach ($files as $path) {
         'hasThumb' => $hasThumb ? 1 : 0
     ];
 }
+
+$pageTitle = $isRoot ? $cfg['title'] : basename($relDir);
 ?>
 <!doctype html>
 <html lang="it">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title><?php echo htmlspecialchars($cfg['title'], ENT_QUOTES); ?></title>
+<title><?php echo htmlspecialchars($pageTitle, ENT_QUOTES); ?></title>
 <style>
 :root {
   --gap: 12px;
