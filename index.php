@@ -261,6 +261,9 @@ if (!auth_ok()) {
     exit;
 }
 
+// Permetti richieste concorrenti mentre gira make_gif
+if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
+
 // === PREPARAZIONE CARTELLE ===
 if (!is_dir($configDir)) { @mkdir($configDir, 0755, true); }
 if (!is_dir($thumbsRoot)) { @mkdir($thumbsRoot, 0755, true); }
