@@ -1,11 +1,12 @@
 <?php
 // === CONFIGURAZIONE ===
-$baseDir    = __DIR__;                                            // cartella principale
-$configName = ".Magic-Photo-Gallery";                             // nome della cartella di configurazione
-$configDir  = $baseDir . DIRECTORY_SEPARATOR . $configName;       // path per tutti i file generati da questo script
-$configFile = $configDir . DIRECTORY_SEPARATOR . '.config.json';  // file di configurazione
-$thumbsRoot = $configDir . DIRECTORY_SEPARATOR . '.thumbs';       // path per le miniature
-$prefThumb  = '.tbn_';                                            // prefisso per file thumbnail
+$baseDir      = __DIR__;                                            // cartella principale
+$configName   = ".Magic-Photo-Gallery";                             // nome della cartella di configurazione
+$configDir    = $baseDir . DIRECTORY_SEPARATOR . $configName;       // path per tutti i file generati da questo script
+$configFile   = $configDir . DIRECTORY_SEPARATOR . '.config.json';  // file di configurazione
+$thumbsRoot   = $configDir . DIRECTORY_SEPARATOR . '.thumbs';       // path per le miniature
+$prefThumb    = '.tbn_';                                            // prefisso per file thumbnail
+$imgExtension = 'jpg,jpeg,JPG,JPEG,png,PNG,heic,HEIC';
 
 // Nome del file script corrente (senza path). Evita hardcoding.
 $self = basename($_SERVER['SCRIPT_NAME'] ?? 'index.php');
@@ -116,6 +117,8 @@ function dbg_log($data) {
     $line = '[' . date('c') . '] ' . json_encode($data, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) . PHP_EOL;
     @file_put_contents($configDir . '/.debug.log', $line, FILE_APPEND);
 }
+
+$__LAST_THUMB_ERR = null;
 function img_dims($path) {
     $s = @getimagesize($path);
     return $s ? ['w'=>$s[0]??0,'h'=>$s[1]??0,'mime'=>$s['mime']??''] : null;
@@ -149,10 +152,12 @@ function rel_url($abs) {
     return implode('/', $out) ?: '/';
 }
 
-// Nome file thumbnail con prefisso nascosto
+// Nome file thumbnail con prefisso nascosto, sempre .jpg
 function thumb_name($origName) {
-  global $prefThumb;
-    return $prefThumb . $origName;
+    // Thumbs sempre in JPEG: normalizza estensione a .jpg
+    global $prefThumb;
+    $base = preg_replace('/\.[^.]+$/', '', (string)$origName);
+    return $prefThumb . $base . '.jpg';
 }
 
 $thumbWidth = $cfg['thumb_make'];        // lato lungo thumbnail generate
@@ -317,6 +322,7 @@ if (!function_exists('imageflip')) {
 }
 // === FUNZIONE: genera thumbnail ===
 function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
+    $GLOBALS['__LAST_THUMB_ERR'] = null;
     $ops = ['file'=>basename($srcPath),'lib'=>null,'exif'=>null,'actions'=>[]];
     // Assicurati che esista la cartella di destinazione
     $td = dirname($thumbPath);
@@ -330,10 +336,29 @@ function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
         @unlink($thumbPath);
     }
 
+    // Se file è HEIC/HEIF ma ImageMagick non supporta il formato, annota
+    $ext = strtolower(pathinfo($srcPath, PATHINFO_EXTENSION));
+    if (in_array($ext, ['heic','heif'])) {
+        if (!class_exists('Imagick') || (empty(Imagick::queryFormats('HEIC')) && empty(Imagick::queryFormats('HEIF')))) {
+            $GLOBALS['__LAST_THUMB_ERR'] = 'heic-unsupported: imagick senza delegate HEIC/HEIF';
+            dbg_log(['thumb_error'=>$GLOBALS['__LAST_THUMB_ERR'], 'file'=>basename($srcPath)]);
+        }
+    }
+
     // Prova con Imagick se disponibile
     if (class_exists('Imagick')) {
         try {
-            $img = new Imagick($srcPath);
+            // Caricamento robusto per HEIC/HEIF: tenta immagine primaria e fallback [0]
+            $img = new Imagick();
+            $ext = strtolower(pathinfo($srcPath, PATHINFO_EXTENSION));
+            if (in_array($ext,['heic','heif'])) {
+                @$img->setOption('heic:primary','1');
+                @$img->setOption('heic:ignore-auxiliary','true');
+                try { $img->readImage($srcPath); $ops['actions'][]='read:primary'; }
+                catch(Exception $e){ $img->clear(); $img=new Imagick(); $img->readImage($srcPath.'[0]'); $ops['actions'][]='read:primary'; }
+            } else {
+                $img->readImage($srcPath);
+            }
             // Manually honor EXIF orientation before resizing
             $o = (function_exists('exif_read_data') ? get_exif_orientation($srcPath) : 0);
             $ops['exif'] = $o;
@@ -375,6 +400,16 @@ function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
             if (method_exists($img, 'stripImage')) {
                 $img->stripImage();
             }
+            // Forza formato di output a JPEG per compatibilità (HEIC/PNG in ingresso -> JPG in uscita)
+            if (method_exists($img, 'setImageFormat')) {
+                $img->setImageFormat('jpeg');
+            }
+            if (method_exists($img, 'setImageCompression')) {
+                $img->setImageCompression(Imagick::COMPRESSION_JPEG);
+            }
+            if (method_exists($img, 'setImageCompressionQuality')) {
+                $img->setImageCompressionQuality(85);
+            }
             $img->writeImage($thumbPath);
             $img->clear();
             dbg_log(array_merge($ops, [
@@ -383,13 +418,19 @@ function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
             ]));
             return true;
         } catch (Exception $e) {
+            $GLOBALS['__LAST_THUMB_ERR'] = 'imagick-exception: ' . $e->getMessage();
+            dbg_log(['thumb_error'=>$GLOBALS['__LAST_THUMB_ERR'], 'file'=>basename($srcPath)]);
             return false;
         }
     }
 
     // Altrimenti usa GD
     if (function_exists('imagecreatefromjpeg')) {
+        // Prova JPEG poi PNG
         $src = @imagecreatefromjpeg($srcPath);
+        if (!$src && function_exists('imagecreatefrompng')) {
+            $src = @imagecreatefrompng($srcPath);
+        }
         $ops['lib'] = 'gd';
         global $EXIF_AVAILABLE;
         // Auto-orienta in base all'EXIF (se presente)
@@ -431,7 +472,11 @@ function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
                 }
             }
         }
-        if (!$src) return false;
+        if (!$src) {
+            $GLOBALS['__LAST_THUMB_ERR'] = 'gd-open-failed';
+            dbg_log(['thumb_error'=>$GLOBALS['__LAST_THUMB_ERR'], 'file'=>basename($srcPath)]);
+            return false;
+        }
 
         $w = imagesx($src);
         $h = imagesy($src);
@@ -457,8 +502,9 @@ function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
 
 // === FUNZIONE: GIF animata di cartella (Imagick) ===
 function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $delayCs = 8, $progressPath = null) {
-    // Raccogli immagini (solo primo livello della cartella)
-    $files = glob($srcDirAbs . '/*.{jpg,jpeg,JPG,JPEG,png,PNG}', GLOB_BRACE) ?: [];
+  global $imgExtension;
+  // Raccogli immagini (solo primo livello della cartella)
+    $files = glob($srcDirAbs . '/*.{'.$imgExtension.'}', GLOB_BRACE) ?: [];
     natsort($files);
     $files = array_values($files);
     if (empty($files)) return false;
@@ -506,7 +552,16 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
     foreach ($files as $f) {
         if ($count >= $maxFrames) break;
         try {
-            $frame = new Imagick($f);
+            // HEIC/HEIF: forza frame primario / [0] per evitare errori con immagini ausiliarie
+            $ext = strtolower(pathinfo($f, PATHINFO_EXTENSION));
+            if (in_array($ext,['heic','heif'])) {
+                $frame = new Imagick();
+                @$frame->setOption('heic:primary','1');
+                try { $frame->readImage($f); }
+                catch(Exception $e){ $frame->clear(); $frame=new Imagick(); $frame->readImage($f.'[0]'); }
+            } else {
+                $frame = new Imagick($f);
+            }
             if (method_exists($frame,'autoOrientImage')) $frame->autoOrientImage();
             // Resize lato lungo = frameSize
             $w = $frame->getImageWidth(); $h = $frame->getImageHeight();
@@ -632,8 +687,58 @@ if (isset($_GET['make_thumb'])) {
         'name' => $name,
         'thumb' => $ok && file_exists($thumbPath) ? rel($thumbPath) : null,
         'mtime' => $ok && file_exists($thumbPath) ? filemtime($thumbPath) : null,
-        'exif' => (bool)$EXIF_AVAILABLE
+        'exif' => (bool)$EXIF_AVAILABLE,
+        'error' => $ok ? null : ($GLOBALS['__LAST_THUMB_ERR'] ?? 'gen-failed')
     ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// === ENDPOINT: purge cache thumbs+gif per una cartella ===
+if (isset($_GET['purge_cache'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    if (!auth_ok()) { http_response_code(401); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
+
+    $targetRel = trim(str_replace(['\\'],'/', ltrim($_GET['dir'] ?? $relDir, '/')));
+    if (strpos($targetRel,'..') !== false) { echo json_encode(['ok'=>false,'error'=>'bad_rel']); exit; }
+    $recursive = !empty($_GET['recursive']);
+    $purged = ['thumbs'=>0,'gifs'=>0,'dirs'=>0];
+
+    $purgeOne = function($rel) use ($thumbsRoot, $prefThumb, $folderGifName, &$purged) {
+        $tDir = ($rel === '' ? $thumbsRoot : ($thumbsRoot . '/' . $rel));
+        if (!is_dir($tDir)) return;
+        if ($h=@opendir($tDir)) {
+            while(false!==($f=readdir($h))){
+                if ($f==='.'||$f==='..') continue;
+                $p=$tDir.'/'.$f; if (is_dir($p)) continue;
+                if ($f===$folderGifName){ @unlink($p); $purged['gifs']++; }
+                if (strpos($f,$prefThumb)===0){ @unlink($p); $purged['thumbs']++; }
+            }
+            closedir($h);
+        }
+        $purged['dirs']++;
+    };
+
+    if ($recursive) {
+        $start = ($targetRel === '' ? $thumbsRoot : ($thumbsRoot . '/' . $targetRel));
+        $len = strlen($thumbsRoot) + 1;
+        if (is_dir($start)) {
+            $dirs = [$start];
+            $it = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($start, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::SELF_FIRST
+            );
+            foreach ($it as $path=>$info) if ($info->isDir()) $dirs[]=$path;
+            $rels = array_unique(array_map(function($d)use($len){
+                $d=str_replace('\\','/',$d); return ltrim(substr($d,$len),'/');
+            },$dirs));
+            foreach($rels as $r) $purgeOne($r);
+        }
+    } else {
+        $purgeOne($targetRel);
+    }
+    echo json_encode(['ok'=>true,'purged'=>$purged], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -646,16 +751,67 @@ foreach ($dIt as $entry) {
     if (!is_dir($abs)) continue;
     $rel = ltrim(($relDir ? $relDir . '/' : '') . $entry, '/');
     if (is_excluded_dir($entry, $rel)) continue;
+    // Conta elementi interni immediati
+    $imgCount = 0;
+    foreach (glob($abs . '/*.{'.$imgExtension.'}', GLOB_BRACE) ?: [] as $p) {
+        if (basename($p)[0] !== '.') $imgCount++;
+    }
+    $dirCount = 0;
+    $scanInner = @scandir($abs) ?: [];
+    foreach ($scanInner as $e2) {
+        if ($e2 === '.' || $e2 === '..') continue;
+        if ($e2[0] === '.') continue;
+        $abs2 = $abs . '/' . $e2;
+        if (!is_dir($abs2)) continue;
+        $rel2 = ltrim(($rel ? $rel . '/' : '') . $e2, '/');
+        if (is_excluded_dir($e2, $rel2)) continue;
+        $dirCount++;
+    }
     // GIF path
     $gifAbs = ($rel === '' ? ($thumbsRoot . '/' . $folderGifName) : ($thumbsRoot . '/' . $rel . '/' . $folderGifName));
+    // Placeholder SVG per "cartella annidata" quando non ci sono foto ma ci sono sottocartelle
+    $placeholder = null;
+    if (!file_exists($gifAbs) && $imgCount === 0 && $dirCount > 0) {
+        $svg = '<?xml version="1.0" encoding="UTF-8"?>'
+             . '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 150" preserveAspectRatio="xMidYMid slice">'
+             . '<defs>'
+             . '  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">'
+             . '    <stop offset="0" stop-color="#eef1f5"/><stop offset="1" stop-color="#e3e6ea"/>'
+             . '  </linearGradient>'
+             . '  <linearGradient id="folder" x1="0" y1="0" x2="0" y2="1">'
+             . '    <stop offset="0" stop-color="#ffd36b"/><stop offset="1" stop-color="#f0b548"/>'
+             . '  </linearGradient>'
+             . '  <filter id="soft" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur in="SourceAlpha" stdDeviation="2"/><feOffset dy="1"/><feComponentTransfer><feFuncA type="linear" slope="0.35"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>'
+             . '</defs>'
+             . '<rect width="200" height="150" rx="16" fill="url(#bg)"/>'
+             . '<g transform="translate(20,36)" filter="url(#soft)">'
+             . '  <!-- linguetta -->'
+             . '  <path d="M18 6h32c6 0 10 2 13 6l5 6h78a12 12 0 0 1 12 12v48a12 12 0 0 1-12 12H12A12 12 0 0 1 0 78V18A12 12 0 0 1 12 6z" fill="url(#folder)" stroke="#d39f43" stroke-width="1"/>'
+             . '  <!-- documenti stilizzati -->'
+             . '  <g opacity=".9" transform="translate(24,28)">'
+             . '    <rect x="0" y="8" width="50" height="34" rx="6" fill="#fff" stroke="#d9d9d9"/>'
+             . '    <rect x="10" y="0" width="60" height="38" rx="6" fill="#fff" stroke="#d9d9d9"/>'
+             . '  </g>'
+             . '  <!-- indice cartelle -->'
+             . '  <g opacity=".8" transform="translate(110,24)">'
+             . '    <rect x="0" y="0" width="48" height="30" rx="6" fill="#fff" stroke="#d9d9d9"/>'
+             . '    <path d="M12 9h24M12 15h24M12 21h24" stroke="#a0a0a0" stroke-width="3" stroke-linecap="round"/>'
+             . '  </g>'
+             . '</g>'
+             . '</svg>';
+        $placeholder = 'data:image/svg+xml;base64,' . base64_encode($svg);
+    }
     $subdirs[] = [
         'name' => $entry,
         'rel'  => $rel,
-        'gif'  => file_exists($gifAbs) ? rel_url($gifAbs) : null
+        'gif'  => file_exists($gifAbs) ? rel_url($gifAbs) : null,
+        'imgs' => $imgCount,
+        'dirs' => $dirCount,
+        'placeholder' => $placeholder
     ];
 }
 // immagini nella cartella corrente
-$files = array_values(array_filter(glob($currentAbs . '/*.{jpg,jpeg,JPG,JPEG}', GLOB_BRACE) ?: [], function($p){
+$files = array_values(array_filter(glob($currentAbs . '/*.{'.$imgExtension.'}', GLOB_BRACE) ?: [], function($p){
     return basename($p)[0] !== '.';
 }));
 natsort($files);
@@ -733,6 +889,14 @@ header { padding: 12px 16px; font-weight: 600; }
 .card.loading .progress { display:block; }
 .card.loading .pct { display:block; }
 .card.loading .name { opacity:.85; }
+.badges{
+  position:absolute; top:8px; left:8px; display:flex; gap:6px; z-index:2;
+}
+.badge{
+  font-size:12px; line-height:1; padding:4px 6px; border-radius:999px;
+  background:rgba(0,0,0,.55); color:#fff; text-shadow:0 1px 1px rgba(0,0,0,.5);
+  backdrop-filter:saturate(120%) blur(2px);
+}
 .card img { display:block; width:100%; height:100%; object-fit:cover; transition:transform .2s ease; background: transparent; }
 .card:hover img { transform: scale(1.03); }
 .name{
@@ -758,6 +922,7 @@ header { padding: 12px 16px; font-weight: 600; }
 .counter { position:absolute; bottom:16px; left:50%; transform:translateX(-50%); font-size:14px; color:#bbb; }
 button { all:unset; }
 @media (hover:none){ .card:hover img{transform:none;} }
+.collapsed { display:none !important; }
 </style>
 </head>
 <body>
@@ -787,28 +952,33 @@ button { all:unset; }
       ?>
     </nav>
     <div class="title"><?php echo htmlspecialchars($cfg['title'],ENT_QUOTES); ?></div>
-    <?php if (!empty($cfg['auth_enabled'])): ?>
-    <span style="display:flex; gap:12px; margin-left:auto;">
-      <a href="#" id="mkHash" style="color:inherit;">Crea hash</a>
-      <a href="?logout=1" style="color:inherit;">Esci</a>
+    <span style="display:flex; gap:12px; margin-left:auto; align-items:center;">
+      <a href="#" id="purgeBtn" style="color:inherit;" title="Elimina anteprime e GIF della cartella corrente">Pulisci cache</a>
+      <?php if (!empty($cfg['auth_enabled'])): ?>
+        <a href="#" id="mkHash" style="color:inherit;">Crea hash</a>
+        <a href="?logout=1" style="color:inherit;">Esci</a>
+      <?php endif; ?>
     </span>
-    <?php else: ?>
-    <span></span>
-    <?php endif; ?>
   </div>
 </header>
 
 <?php if (!empty($subdirs)): ?>
 <section style="padding:0 var(--gap);">
-  <h3 style="margin:6px 0 8px 0; font-size:14px; font-weight:600;">Cartelle</h3>
+  <h3 id="foldersToggle" style="margin:6px 0 8px 0; font-size:14px; font-weight:600; cursor:pointer; user-select:none;">
+    <span id="foldersCaret" aria-hidden="true">▾</span> Cartelle
+  </h3>
   <div class="grid" id="folders">
     <?php foreach ($subdirs as $sd): ?>
-      <a class="card" href="<?php echo htmlspecialchars($self,ENT_QUOTES); ?>?dir=<?php echo rawurlencode($sd['rel']); ?>" data-rel="<?php echo htmlspecialchars($sd['rel'],ENT_QUOTES); ?>" style="display:block; text-decoration:none; color:inherit;">
+      <a class="card" href="<?php echo htmlspecialchars($self,ENT_QUOTES); ?>?dir=<?php echo rawurlencode($sd['rel']); ?>" data-rel="<?php echo htmlspecialchars($sd['rel'],ENT_QUOTES); ?>" data-has-imgs="<?php echo ($sd['imgs']>0)?'1':'0'; ?>" style="display:block; text-decoration:none; color:inherit;">
         <img
-          src="<?php echo $sd['gif'] ? htmlspecialchars($sd['gif'],ENT_QUOTES) : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='; ?>"
+          src="<?php echo $sd['gif'] ? htmlspecialchars($sd['gif'],ENT_QUOTES) : ($sd['placeholder'] ? $sd['placeholder'] : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='); ?>"
           alt="<?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?>"
           data-gif="<?php echo htmlspecialchars($sd['gif'] ?? '',ENT_QUOTES); ?>"
           loading="lazy" decoding="async">
+        <div class="badges">
+          <?php if ($sd['dirs'] > 0): ?><span class="badge" title="Cartelle">📁 <?php echo (int)$sd['dirs']; ?></span><?php endif; ?>
+          <?php if ($sd['imgs'] > 0): ?><span class="badge" title="Foto">🖼 <?php echo (int)$sd['imgs']; ?></span><?php endif; ?>
+        </div>
         <div class="name" title="<?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?>"><?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?></div>
         <div class="progress"><span></span></div>
         <div class="topshade"><div class="pct">0%</div></div>
@@ -860,6 +1030,43 @@ button { all:unset; }
   const btnNext = document.getElementById('btnNext');
   const folders = document.getElementById('folders');
   let idx = -1;
+
+  // Purge cache corrente (ricorsivo dalla root)
+  const purgeBtn = document.getElementById('purgeBtn');
+  purgeBtn?.addEventListener('click', (e)=>{
+    e.preventDefault();
+    const isRoot = !window.__CUR_DIR__;
+    const msg = isRoot
+      ? 'Eliminare TUTTE le anteprime e GIF di TUTTE le cartelle?'
+      : 'Eliminare le anteprime e la GIF della cartella corrente?';
+    if (!confirm(msg)) return;
+    const url = withDir(`${window.__SELF__}?purge_cache=1${isRoot ? '&recursive=1' : ''}&t=${Date.now()}`);
+    fetch(url, {cache:'no-store'})
+      .then(r=>r.json())
+      .then(d=>{
+        if (d && d.ok) {
+          alert(`Cache pulita.\nCartelle toccate: ${d.purged.dirs}\nThumbs: ${d.purged.thumbs}\nGIF: ${d.purged.gifs}`);
+          location.reload();
+        } else alert('Errore nella pulizia cache');
+      }).catch(()=>alert('Errore nella pulizia cache'));
+  });
+
+  // Collassa/espandi “Cartelle”
+  const toggle = document.getElementById('foldersToggle');
+  const caret  = document.getElementById('foldersCaret');
+  const keyColl = `mpg_fc_${window.__CUR_DIR__ || ''}`;
+  function applyFoldState(){
+    const st = localStorage.getItem(keyColl) || 'open';
+    if (st==='closed'){ folders?.classList.add('collapsed'); if(caret) caret.textContent='▸'; }
+    else { folders?.classList.remove('collapsed'); if(caret) caret.textContent='▾'; }
+  }
+  applyFoldState();
+  toggle?.addEventListener('click', ()=>{
+    folders?.classList.toggle('collapsed');
+    const closed = folders && folders.classList.contains('collapsed');
+    if (caret) caret.textContent = closed ? '▸' : '▾';
+    localStorage.setItem(keyColl, closed ? 'closed' : 'open');
+  });
 
   // Utility per endpoint con dir
   function withDir(url) {
@@ -960,7 +1167,9 @@ button { all:unset; }
     cards.forEach(card => {
       const img = card.querySelector('img');
       const rel = card.dataset.rel || '';
+      const hasImgs = card.dataset.hasImgs === '1';
       if (img.dataset.gif && img.dataset.gif.length) return; // già pronto
+      if (!hasImgs) return; // niente foto: non generare gif
       startPoll(rel, card);
       fetch(withDir(`${window.__SELF__}?make_gif=${encodeURIComponent(rel)}&t=${Date.now()}`), { cache:'no-store' })
         .then(r=>r.json())
@@ -1018,10 +1227,11 @@ button { all:unset; }
       .then(r => r.json())
       .then(data => {
         if (data && data.ok && data.thumb) {
-          // aggiorna src della thumbnail
           job.img.src = data.thumb + `?v=${Date.now()}`;
           job.img.dataset.hasThumb = '1';
           if (data && data.exif === false) { job.img.setAttribute('data-exif-missing','1'); }
+        } else if (data && data.error) {
+          console.warn('Thumb fail', job.name, data.error);
         }
       })
       .catch(() => {})
