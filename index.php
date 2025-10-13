@@ -194,8 +194,11 @@ $folderGifName = $prefThumb . 'folder.gif';
 
 // Progress file per GIF cartella
 function folder_gif_progress_path($dirRel, $thumbsRoot, $prefThumb) {
-    $base = ($dirRel === '' ? $thumbsRoot : ($thumbsRoot . '/' . $dirRel));
-    return $base . '/' . $prefThumb . 'folder.progress.json';
+    // Usa /tmp per progressi per evitare cache/lag su FS remoti
+    $safe = $dirRel === '' ? '__root__' : str_replace(['\\','/'], '__', $dirRel);
+    $dir  = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'mpg_progress';
+    if (!is_dir($dir)) { @mkdir($dir, 0777, true); }
+    return $dir . DIRECTORY_SEPARATOR . $prefThumb . $safe . '.json';
 }
 
 // helper: verifica se una cartella va esclusa
@@ -461,11 +464,13 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
     if ($progressPath) {
         $td = dirname($progressPath);
         if (!is_dir($td)) @mkdir($td, 0755, true);
-        @file_put_contents($progressPath, json_encode([
+        $tmp = $progressPath . '.tmp';
+        @file_put_contents($tmp, json_encode([
             'total' => $total,
             'done'  => 0,
             'started_at' => time()
-        ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+        ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE), LOCK_EX);
+        @rename($tmp, $progressPath);
     }
 
     // Se non c'è Imagick, usa un PNG/JPEG statico del primo file convertito a GIF
@@ -479,11 +484,13 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
         // copia come gif "finta"
         $ok = @copy($tmpJpg, $gifPath);
         if ($progressPath) {
-            @file_put_contents($progressPath, json_encode([
+            $tmp = $progressPath . '.tmp';
+            @file_put_contents($tmp, json_encode([
                 'total' => 1,
                 'done'  => 1,
                 'done_at' => time()
-            ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+            ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE), LOCK_EX);
+            @rename($tmp, $progressPath);
         }
         return $ok;
     }
@@ -510,10 +517,12 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
             $im->setImageDispose(Imagick::DISPOSE_BACKGROUND);
             $count++;
             if ($progressPath) {
-                @file_put_contents($progressPath, json_encode([
+                $tmp = $progressPath . '.tmp';
+                @file_put_contents($tmp, json_encode([
                     'total' => $total,
                     'done'  => $count
-                ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+                ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE), LOCK_EX);
+                @rename($tmp, $progressPath);
             }
         } catch (Exception $e) { continue; }
     }
@@ -522,11 +531,13 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
     $ok = $im->writeImages($gifPath, true);
     $im->clear();
     if ($progressPath) {
-        @file_put_contents($progressPath, json_encode([
+        $tmp = $progressPath . '.tmp';
+        @file_put_contents($tmp, json_encode([
             'total' => $total,
             'done'  => $count,
             'done_at' => time()
-        ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+        ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE), LOCK_EX);
+        @rename($tmp, $progressPath);
     }
     return $ok;
 }
@@ -684,6 +695,11 @@ $pageTitle = $isRoot ? $cfg['title'] : basename($relDir);
 }
 body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
 header { padding: 12px 16px; font-weight: 600; }
+.hdr { display:flex; align-items:center; justify-content:space-between; gap:12px; position:relative; }
+.hdr .title { position:absolute; left:50%; transform:translateX(-50%); text-align:center; font-weight:700; }
+.crumbs a { color: inherit; text-decoration: none; }
+.crumbs { font-weight:600; display:flex; align-items:center; gap:6px; }
+.crumbs .sep { opacity:.6; }
 .grid { display: grid; gap: var(--gap); padding: var(--gap);
   grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size), 1fr)); }
 .card { position: relative; border-radius: 10px; overflow: hidden; background: rgba(0,0,0,.2); cursor:pointer;
@@ -747,26 +763,46 @@ button { all:unset; }
   window.__SELF__ = <?php echo json_encode($self, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE); ?>;
 </script>
 <header>
-  <?php
-    $crumbs = [];
-    $acc = '';
-    $crumbs[] = '<a href="'.$self.'" style="color:inherit;text-decoration:none;">'.htmlspecialchars($cfg['title'],ENT_QUOTES).'</a>';
-    if (!$isRoot) {
-      foreach (explode('/', $relDir) as $seg) {
-        $acc = ltrim($acc . '/' . $seg, '/');
-        if (is_excluded_dir($seg, $acc)) break;
-        $crumbs[] = '<a href="'.$self.'?dir='.rawurlencode($acc).'" style="color:inherit;text-decoration:none;">'.htmlspecialchars($seg,ENT_QUOTES).'</a>';
-      }
-    }
-    echo implode(' / ', $crumbs);
-  ?>
-  &nbsp; (<?php echo count($items); ?> immagini)
-  <?php if (!empty($cfg['auth_enabled'])): ?>
-    <span style="float:right; display:flex; gap:12px;">
+  <div class="hdr">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="<?php echo htmlspecialchars($self,ENT_QUOTES); ?>" title="Home">🏠</a>
+      <?php
+        if (!$isRoot) {
+          $acc = '';
+          foreach (explode('/', $relDir) as $i => $seg) {
+            $acc = ltrim($acc . '/' . $seg, '/');
+            if (is_excluded_dir($seg, $acc)) break;
+            echo '<span class="sep">›</span><a href="'.$self.'?dir='.rawurlencode($acc).'">'.htmlspecialchars($seg,ENT_QUOTES).'</a>';
+          }
+        }
+      ?>
+    </nav>
+    <div class="title"><?php echo htmlspecialchars($cfg['title'],ENT_QUOTES); ?></div>
+    <?php if (!empty($cfg['auth_enabled'])): ?>
+    <span style="display:flex; gap:12px; margin-left:auto;">
       <a href="#" id="mkHash" style="color:inherit;">Crea hash</a>
       <a href="?logout=1" style="color:inherit;">Esci</a>
     </span>
-  <?php endif; ?>
+    <?php else: ?>
+    <span></span>
+    <?php endif; ?>
+  </div>
+  <?php
+    $foldersCount = count($subdirs);
+    $imagesCount  = count($items);
+    if ($foldersCount > 0) {
+      echo '<div style="margin-top:6px; font-size:12px; opacity:.8; display:flex; gap:16px;">';
+      echo '<span>'.$foldersCount.' cartella'.($foldersCount===1?'':'e').'</span>';
+      if ($imagesCount > 0) {
+        echo '<span>Foto: '.$imagesCount.'</span>';
+      }
+      echo '</div>';
+    } else {
+      if ($imagesCount > 0) {
+        echo '<div style="margin-top:6px; font-size:12px; opacity:.8;">Foto: '.$imagesCount.'</div>';
+      }
+    }
+  ?>
 </header>
 
 <?php if (!empty($subdirs)): ?>
@@ -789,10 +825,10 @@ button { all:unset; }
 </section>
 <?php endif; ?>
 
-<?php if (empty($items)): ?>
+<?php if (empty($items) && empty($subdirs)): ?>
 <p style="padding:16px">Nessuna immagine trovata.</p>
 <?php else: ?>
-<h3 style="margin:6px 0 0 0; padding:0 var(--gap); font-size:14px; font-weight:600;">Foto</h3>
+<h3 style="margin:6px 0 0 0; padding:0 var(--gap); font-size:14px; font-weight:600;">Foto<?php if (count($items)>0) echo ' ('.count($items).')'; ?></h3>
 <main class="grid" id="grid">
 <?php foreach ($items as $idx => $it): ?>
   <figure class="card" data-idx="<?php echo $idx; ?>">
@@ -938,6 +974,7 @@ button { all:unset; }
         .then(d=>{
           if (d && d.ok && d.gif) {
             img.src = d.gif + '&cb=' + Date.now();
+            card.classList.remove('loading');
           }
         })
         .catch(()=>{})
@@ -946,7 +983,7 @@ button { all:unset; }
           if (iv) { clearInterval(iv); pollers.delete(rel); }
           const bar = card.querySelector('.progress > span'); if (bar) bar.style.width = '100%';
           const pct = card.querySelector('.pct'); if (pct) pct.textContent = '100%';
-          setTimeout(()=>{ card.classList.remove('loading'); }, 300);
+          //setTimeout(()=>{ card.classList.remove('loading'); }, 300);
         });
     });
   }
