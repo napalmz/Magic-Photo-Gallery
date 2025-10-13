@@ -137,6 +137,18 @@ function rel($abs) {
     return '/' . basename($abs);
 }
 
+// URL relativo con percent-encoding dei segmenti (gestisce spazi e caratteri speciali)
+function rel_url($abs) {
+    $p = rel($abs);
+    $parts = explode('/', $p);
+    $out = [];
+    foreach ($parts as $i => $seg) {
+        if ($seg === '' && $i === 0) { $out[] = ''; continue; } // leading slash
+        $out[] = rawurlencode($seg);
+    }
+    return implode('/', $out) ?: '/';
+}
+
 // Nome file thumbnail con prefisso nascosto
 function thumb_name($origName) {
   global $prefThumb;
@@ -522,6 +534,8 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
 // === ENDPOINT: stato avanzamento GIF cartella ===
 if (isset($_GET['gif_progress'])) {
     header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
     if (!auth_ok()) { http_response_code(401); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
     $dirRel = trim(str_replace(['\\'],'/', ltrim($_GET['gif_progress'],'/')));
     if (strpos($dirRel,'..') !== false) { echo json_encode(['ok'=>false]); exit; }
@@ -537,6 +551,8 @@ if (isset($_GET['gif_progress'])) {
 // === ENDPOINT ASINCRONO: genera GIF anteprima cartella ===
 if (isset($_GET['make_gif'])) {
     header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
     if (!auth_ok()) { http_response_code(401); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
     @set_time_limit(0);
     $dirRel = trim(str_replace(['\\'],'/', ltrim($_GET['make_gif'],'/')));
@@ -553,7 +569,7 @@ if (isset($_GET['make_gif'])) {
     $ok = create_folder_gif($srcAbs, $gifAbs, max(96, (int)$cfg['thumb_view']), 12, 8, $progressPath);
     echo json_encode([
         'ok' => (bool)$ok,
-        'gif' => $ok ? rel($gifAbs) . '?v=' . time() : null
+        'gif' => $ok ? rel_url($gifAbs) . '?v=' . time() : null
     ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -621,7 +637,7 @@ foreach ($dIt as $entry) {
     $subdirs[] = [
         'name' => $entry,
         'rel'  => $rel,
-        'gif'  => file_exists($gifAbs) ? rel($gifAbs) : null
+        'gif'  => file_exists($gifAbs) ? rel_url($gifAbs) : null
     ];
 }
 // immagini nella cartella corrente
@@ -892,7 +908,7 @@ button { all:unset; }
       if (pct) pct.textContent = '0%';
 
       const iv = setInterval(() => {
-        fetch(withDir(`${window.__SELF__}?gif_progress=${encodeURIComponent(rel)}`), { cache:'no-store' })
+        fetch(withDir(`${window.__SELF__}?gif_progress=${encodeURIComponent(rel)}&t=${Date.now()}`), { cache:'no-store' })
           .then(r=>r.ok ? r.json() : null)
           .then(d=>{
             if (!d || !d.ok) return;
@@ -917,32 +933,20 @@ button { all:unset; }
       const rel = card.dataset.rel || '';
       if (img.dataset.gif && img.dataset.gif.length) return; // già pronto
       startPoll(rel, card);
-      fetch(withDir(`${window.__SELF__}?make_gif=${encodeURIComponent(rel)}`), { cache:'no-store' })
+      fetch(withDir(`${window.__SELF__}?make_gif=${encodeURIComponent(rel)}&t=${Date.now()}`), { cache:'no-store' })
         .then(r=>r.json())
         .then(d=>{
           if (d && d.ok && d.gif) {
-            img.src = d.gif;
+            img.src = d.gif + '&cb=' + Date.now();
           }
         })
         .catch(()=>{})
         .finally(()=>{
-          // ferma il poller se ancora attivo
           const iv = pollers.get(rel);
           if (iv) { clearInterval(iv); pollers.delete(rel); }
           const bar = card.querySelector('.progress > span'); if (bar) bar.style.width = '100%';
           const pct = card.querySelector('.pct'); if (pct) pct.textContent = '100%';
-          // mostra subito la gif se disponibile (anche se il then non l'ha impostata per cache/temporanei)
-          const img = card.querySelector('img');
-          if (img && (!img.src || img.src.startsWith('data:'))) {
-            // prova a caricare la gif direttamente
-            fetch(withDir(`${window.__SELF__}?gif_progress=${encodeURIComponent(rel)}`), { cache:'no-store' })
-              .finally(()=>{
-                // rimuovi overlay dopo un attimo
-                setTimeout(()=>{ card.classList.remove('loading'); }, 300);
-              });
-          } else {
-            setTimeout(()=>{ card.classList.remove('loading'); }, 300);
-          }
+          setTimeout(()=>{ card.classList.remove('loading'); }, 300);
         });
     });
   }
