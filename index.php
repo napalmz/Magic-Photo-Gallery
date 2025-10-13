@@ -256,6 +256,13 @@ if (!file_exists($htaccessPath)) {
 </Files>
 # Niente listing
 Options -Indexes
+
+# Cache aggressiva per risorse statiche generate (thumbs e gif)
+<IfModule mod_headers.c>
+  <FilesMatch "\\.(?:jpe?g|png|gif)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+</IfModule>
 HTA;
     @file_put_contents($htaccessPath, $ht);
 }
@@ -611,6 +618,7 @@ header { padding: 12px 16px; font-weight: 600; }
   grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size), 1fr)); }
 .card { position: relative; border-radius: 10px; overflow: hidden; background: rgba(0,0,0,.2); cursor:pointer;
   aspect-ratio: 1 / 1; /* celle quadrate e uniformi */
+  content-visibility: auto; contain-intrinsic-size: var(--thumb-size) var(--thumb-size);
 }
 .card img { display:block; width:100%; height:100%; object-fit:cover; transition:transform .2s ease; background: transparent; }
 .card:hover img { transform: scale(1.03); }
@@ -699,7 +707,7 @@ button { all:unset; }
 <?php foreach ($items as $idx => $it): ?>
   <figure class="card" data-idx="<?php echo $idx; ?>">
     <img
-      src="<?php echo $it['hasThumb'] ? $it['thumb'] : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='; ?>"
+      src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
       data-thumb="<?php echo $it['thumb']; ?>"
       data-name="<?php echo $it['name']; ?>"
       data-has-thumb="<?php echo (int)$it['hasThumb']; ?>"
@@ -815,6 +823,25 @@ button { all:unset; }
     name: img.dataset.name,
     img
   }));
+
+  // Lazy-load per thumbs già esistenti
+  const io = ('IntersectionObserver' in window) ? new IntersectionObserver((entries, obs) => {
+    for (const en of entries) {
+      if (!en.isIntersecting) continue;
+      const im = en.target;
+      if (im.dataset.hasThumb === '1' && im.dataset.thumb) {
+        // carica solo quando visibile
+        if (!im.dataset.loaded) {
+          im.src = im.dataset.thumb;
+          im.dataset.loaded = '1';
+        }
+        obs.unobserve(im);
+      }
+    }
+  }, { rootMargin: '200px' }) : null;
+  
+  // attacca l'observer a tutte le immagini
+  imgs.forEach(img => { io && io.observe(img); });
 
   let active = 0;
   function nextJob() {
