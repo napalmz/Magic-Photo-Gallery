@@ -722,8 +722,14 @@ header { padding: 12px 16px; font-weight: 600; }
 .pct {
   position:absolute; top:6px; right:10px;
   font-size:11px; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.85);
+}
+.topshade{
+  position:absolute; left:0; right:0; top:0; height:34px;
+  background:linear-gradient(to bottom, rgba(0,0,0,.6), rgba(0,0,0,0));
   display:none;
 }
+.card.loading .topshade{ display:block; }
+.topshade .pct{ display:block; } /* forza visibilità dentro la banda */
 .card.loading .progress { display:block; }
 .card.loading .pct { display:block; }
 .card.loading .name { opacity:.85; }
@@ -805,7 +811,7 @@ button { all:unset; }
           loading="lazy" decoding="async">
         <div class="name" title="<?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?>"><?php echo htmlspecialchars($sd['name'],ENT_QUOTES); ?></div>
         <div class="progress"><span></span></div>
-        <div class="pct">0%</div>
+        <div class="topshade"><div class="pct">0%</div></div>
       </a>
     <?php endforeach; ?>
   </div>
