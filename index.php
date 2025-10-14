@@ -24,6 +24,11 @@ $defaults = [
     'fg_dark'       => '#eeeeee',
     // Cartelle da escludere
     'exclude_dirs'  => [ $configName, 'log', 'logs' ],  // ulteriori cartelle da escludere
+    // GIF di cartella
+    'folder_gif_mode'          => 'transition', // 'transition' | 'cut'
+    'folder_gif_fade_frames'   => 6,            // frame intermedi per dissolvenza tra due foto (usato in 'transition')
+    'folder_gif_max_frames'    => 12,           // massimo numero di foto di partenza
+    'folder_gif_delay_cs'      => 80,            // ritardo di base per frame (centisecondi)
     // Modalità autenticazione: 0=nessun login, 1=login solo per funzioni extra, 2=login per tutto
     'auth_mode'     => 0,
     'auth_password' => ''   // può essere testo in chiaro o password_hash() ($2y$...)
@@ -58,6 +63,11 @@ if (is_file($configFile)) {
 $cfg['title'] = (string)$cfg['title'];
 $cfg['thumb_make'] = max(32, (int)$cfg['thumb_make']);
 $cfg['thumb_view'] = max(48, (int)$cfg['thumb_view']);
+// GIF cfg
+$cfg['folder_gif_mode'] = in_array(($cfg['folder_gif_mode'] ?? 'transition'), ['transition','cut'], true) ? $cfg['folder_gif_mode'] : 'transition';
+$cfg['folder_gif_fade_frames'] = max(0, (int)($cfg['folder_gif_fade_frames'] ?? 6));
+$cfg['folder_gif_max_frames'] = max(1, (int)($cfg['folder_gif_max_frames'] ?? 12));
+$cfg['folder_gif_delay_cs'] = max(1, (int)($cfg['folder_gif_delay_cs'] ?? 8));
 // Backward-compatibilità: se esiste 'auth_enabled' nel file di config, mappa a auth_mode (true->2, false->0) solo se 'auth_mode' non è definito
 if (!array_key_exists('auth_mode', $cfg) && array_key_exists('auth_enabled', $cfg)) {
     $cfg['auth_mode'] = !empty($cfg['auth_enabled']) ? 2 : 0;
@@ -524,8 +534,10 @@ function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
 }
 
 // === FUNZIONE: GIF animata di cartella (Imagick) ===
-function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $delayCs = 8, $progressPath = null) {
+function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $delayCs = 8, $progressPath = null, $mode = 'transition', $fadeFrames = 6) {
   global $imgExtension;
+  $mode = $mode ?: 'transition';
+  $fadeFrames = max(0, (int)$fadeFrames);
   // Raccogli immagini (solo primo livello della cartella)
     $files = glob($srcDirAbs . '/*.{'.$imgExtension.'}', GLOB_BRACE) ?: [];
     natsort($files);
@@ -547,35 +559,54 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
 
     // Se non c'è Imagick, usa un PNG/JPEG statico del primo file convertito a GIF
     if (!class_exists('Imagick')) {
-        $first = $files[0];
-        // prepara thumb singola e rinominala .gif
-        $tmpJpg = $gifPath . '.tmp.jpg';
-        $td = dirname($gifPath);
-        if (!is_dir($td)) @mkdir($td, 0755, true);
-        if (!create_thumb($first, $tmpJpg, $frameSize, true)) return false;
-        // copia come gif "finta"
-        $ok = @copy($tmpJpg, $gifPath);
-        if ($progressPath) {
-            $tmp = $progressPath . '.tmp';
-            @file_put_contents($tmp, json_encode([
-                'total' => 1,
-                'done'  => 1,
-                'done_at' => time()
-            ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE), LOCK_EX);
-            @rename($tmp, $progressPath);
+        if ($mode === 'transition') {
+            $first = $files[0];
+            // prepara thumb singola e rinominala .gif
+            $tmpJpg = $gifPath . '.tmp.jpg';
+            $td = dirname($gifPath);
+            if (!is_dir($td)) @mkdir($td, 0755, true);
+            if (!create_thumb($first, $tmpJpg, $frameSize, true)) return false;
+            // copia come gif "finta"
+            $ok = @copy($tmpJpg, $gifPath);
+            if ($progressPath) {
+                $tmp = $progressPath . '.tmp';
+                @file_put_contents($tmp, json_encode([
+                    'total' => 1,
+                    'done'  => 1,
+                    'done_at' => time()
+                ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE), LOCK_EX);
+                @rename($tmp, $progressPath);
+            }
+            return $ok;
+        } else {
+            // cut mode: fallback identico (statico)
+            $first = $files[0];
+            $tmpJpg = $gifPath . '.tmp.jpg';
+            $td = dirname($gifPath);
+            if (!is_dir($td)) @mkdir($td, 0755, true);
+            if (!create_thumb($first, $tmpJpg, $frameSize, true)) return false;
+            $ok = @copy($tmpJpg, $gifPath);
+            if ($progressPath) {
+                $tmp = $progressPath . '.tmp';
+                @file_put_contents($tmp, json_encode([
+                    'total' => 1,
+                    'done'  => 1,
+                    'done_at' => time()
+                ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE), LOCK_EX);
+                @rename($tmp, $progressPath);
+            }
+            return $ok;
         }
-        return $ok;
     }
 
     $td = dirname($gifPath);
     if (!is_dir($td)) @mkdir($td, 0755, true);
-    $im = new Imagick();
-    $im->setFormat('gif');
+    $base = new Imagick();
+    $base->setFormat('gif');
     $count = 0;
     foreach ($files as $f) {
         if ($count >= $maxFrames) break;
         try {
-            // HEIC/HEIF: forza frame primario / [0] per evitare errori con immagini ausiliarie
             $ext = strtolower(pathinfo($f, PATHINFO_EXTENSION));
             if (in_array($ext,['heic','heif'])) {
                 $frame = new Imagick();
@@ -586,21 +617,20 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
                 $frame = new Imagick($f);
             }
             if (method_exists($frame,'autoOrientImage')) $frame->autoOrientImage();
-            // Resize lato lungo = frameSize
             $w = $frame->getImageWidth(); $h = $frame->getImageHeight();
             $scale = $frameSize / max($w,$h);
             $newW = max(1,(int)round($w*$scale)); $newH = max(1,(int)round($h*$scale));
             $frame->resizeImage($newW, $newH, Imagick::FILTER_LANCZOS, 1, true);
             if (method_exists($frame,'stripImage')) $frame->stripImage();
-            $frame->setImageDelay($delayCs); // centisecondi
             $frame->setImagePage(0,0,0,0);
-            $im->addImage($frame);
-            $im->setImageDispose(Imagick::DISPOSE_BACKGROUND);
+            $frame->setImageDelay($delayCs);
+            $base->addImage($frame);
+            $base->setImageDispose(Imagick::DISPOSE_BACKGROUND);
             $count++;
             if ($progressPath) {
                 $tmp = $progressPath . '.tmp';
                 @file_put_contents($tmp, json_encode([
-                    'total' => $total,
+                    'total' => min($maxFrames, count($files)),
                     'done'  => $count
                 ], JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE), LOCK_EX);
                 @rename($tmp, $progressPath);
@@ -608,9 +638,19 @@ function create_folder_gif($srcDirAbs, $gifPath, $frameSize, $maxFrames = 12, $d
         } catch (Exception $e) { continue; }
     }
     if ($count === 0) { return false; }
-    $im = $im->coalesceImages();
-    $ok = $im->writeImages($gifPath, true);
-    $im->clear();
+    $base = $base->coalesceImages();
+    if ($mode === 'transition' && $fadeFrames > 0) {
+        // Genera dissolvenze tra i frame
+        $morphed = $base->morphImages($fadeFrames);
+        // Imposta un delay più breve per i frame intermedi
+        foreach ($morphed as $i => $frm) { $frm->setImageDelay(max(1, (int)floor($delayCs / 2))); }
+        $ok = $morphed->writeImages($gifPath, true);
+        $morphed->clear();
+    } else {
+        // Taglio secco
+        $ok = $base->writeImages($gifPath, true);
+    }
+    $base->clear();
     if ($progressPath) {
         $tmp = $progressPath . '.tmp';
         @file_put_contents($tmp, json_encode([
@@ -658,7 +698,16 @@ if (isset($_GET['make_gif'])) {
     }
     $gifAbs = ($dirRel === '' ? ($thumbsRoot . '/' . $folderGifName) : ($thumbsRoot . '/' . $dirRel . '/' . $folderGifName));
     $progressPath = folder_gif_progress_path($dirRel, $thumbsRoot, $prefThumb);
-    $ok = create_folder_gif($srcAbs, $gifAbs, max(96, (int)$cfg['thumb_view']), 12, 8, $progressPath);
+    $ok = create_folder_gif(
+        $srcAbs,
+        $gifAbs,
+        max(96, (int)$cfg['thumb_view']),
+        (int)$cfg['folder_gif_max_frames'],
+        (int)$cfg['folder_gif_delay_cs'],
+        $progressPath,
+        (string)$cfg['folder_gif_mode'],
+        (int)$cfg['folder_gif_fade_frames']
+    );
     echo json_encode([
         'ok' => (bool)$ok,
         'gif' => $ok ? rel_url($gifAbs) . '?v=' . time() : null
