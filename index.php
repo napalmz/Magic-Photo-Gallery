@@ -996,6 +996,25 @@ header { padding: 12px 16px; font-weight: 600; }
 .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.92);
   display:none; align-items:center; justify-content:center; z-index:9999; }
 .lightbox.open { display:flex; }
+.spinner {
+  position:absolute;
+  top:50%; left:50%;
+  width:48px; height:48px;
+  margin:-24px 0 0 -24px;
+  border:4px solid rgba(255,255,255,0.2);
+  border-top-color:#fff;
+  border-radius:50%;
+  animation: spin 0.8s linear infinite;
+  display:none;
+  z-index:10000;
+}
+.lightbox.loading .spinner {
+  display:block;
+}
+@keyframes spin {
+  from { transform:rotate(0deg); }
+  to { transform:rotate(360deg); }
+}
 .lb-img-wrap { max-width:95vw; max-height:90vh; }
 .lb-img-wrap img { max-width:100%; max-height:90vh; display:block; margin:0 auto; }
 .close,.nav { position:absolute; top:50%; transform:translateY(-50%);
@@ -1103,6 +1122,7 @@ button { all:unset; }
 <?php endif; ?>
 
 <div class="lightbox" id="lightbox" aria-hidden="true">
+  <div class="spinner" id="spinner" aria-hidden="true"></div>
   <button class="close" id="btnClose">✕</button>
   <button class="nav prev" id="btnPrev">❮</button>
   <div class="lb-img-wrap"><img id="lbImg" alt=""></div>
@@ -1115,6 +1135,7 @@ button { all:unset; }
   const items = <?php echo json_encode($items, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE); ?>;
   const grid = document.getElementById('grid');
   const lb = document.getElementById('lightbox');
+  const spinner = document.getElementById('spinner');
   const lbImg = document.getElementById('lbImg');
   const counter = document.getElementById('counter');
   const btnClose = document.getElementById('btnClose');
@@ -1218,11 +1239,24 @@ button { all:unset; }
   // Lightbox
   function openAt(i){
     idx = (i + items.length) % items.length;
-    lbImg.src = items[idx].src;
+    lb.classList.add('open','loading');
+    spinner.style.display = 'block';
+    const src = items[idx].src;
+    lbImg.src = '';
     lbImg.alt = items[idx].name;
     counter.textContent = (idx+1) + ' / ' + items.length;
-    lb.classList.add('open');
     document.body.style.overflow = 'hidden';
+    const tmp = new Image();
+    tmp.onload = () => {
+      lbImg.src = src;
+      lb.classList.remove('loading');
+      spinner.style.display = 'none';
+    };
+    tmp.onerror = () => {
+      lb.classList.remove('loading');
+      spinner.style.display = 'none';
+    };
+    tmp.src = src;
   }
   function closeLb(){ lb.classList.remove('open'); document.body.style.overflow = ''; lbImg.src = ''; }
   function prev(){ openAt(idx-1); }
