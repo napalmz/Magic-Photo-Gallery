@@ -386,7 +386,7 @@ function create_thumb($srcPath, $thumbPath, $thumbWidth, $force = false) {
             $o = (function_exists('exif_read_data') ? get_exif_orientation($srcPath) : 0);
             $ops['exif'] = $o;
             if ($o >= 2) {
-                $bg = new ImagickPixel('none');
+                $bg = new Imagick('xc:none');
                 switch ($o) {
                     case 2: $img->flopImage();            $ops['actions'][] = 'flop'; break;     // mirror horizontal
                     case 3: $img->rotateImage($bg, 180);  $ops['actions'][] = 'rot180'; break;   // 180°
