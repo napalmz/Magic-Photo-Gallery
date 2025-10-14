@@ -26,8 +26,11 @@ services:
     environment:
       - TZ=Europe/Rome
     volumes:
-      - "/my/photo/directory:/var/www/site"
-      - "/my/photo/directory/log:/var/log/apache2"
+      - "/my/app/directory/config:/var/www/site"        # Store PHP app and configurations
+      - "/my/app/directory/log:/var/log/apache2"        # Store APACHE/PHP logs
+      - "/my/photo/directory1:/var/www/site/Photo 1:ro" # Safely store pictures, it's READ ONLY
+      - "/my/photo/directory2:/var/www/site/Photo 2:ro" # Safely store pictures, it's READ ONLY
+      - "/my/photo/directory3:/var/www/site/Photo 3:ro" # Safely store pictures, it's READ ONLY
     ports:
       - 80:80
     restart: always
