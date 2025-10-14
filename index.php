@@ -329,6 +329,27 @@ HTA;
     @file_put_contents($htaccessPath, $ht);
 }
 
+/** Enforce sane defaults in the web root to avoid MultiViews negotiation issues */
+$rootHtaccess = $baseDir . '/.htaccess';
+$needLines = [];
+$existing = is_file($rootHtaccess) ? @file_get_contents($rootHtaccess) : '';
+
+if (stripos($existing, 'DirectoryIndex') === false || stripos($existing, 'index.php') === false) {
+    $needLines[] = 'DirectoryIndex index.php index.html';
+}
+
+$hasMinusMulti = (stripos($existing, 'Options') !== false && stripos($existing, '-MultiViews') !== false);
+if (!$hasMinusMulti) {
+    $needLines[] = "<IfModule mod_negotiation.c>\n  Options -MultiViews\n</IfModule>";
+}
+
+if (!empty($needLines)) {
+    $payload = rtrim($existing) . (strlen($existing) ? "\n\n" : '');
+    $payload .= "# Added by Magic-Photo-Gallery to avoid content negotiation issues\n";
+    $payload .= implode("\n", $needLines) . "\n";
+    @file_put_contents($rootHtaccess, $payload);
+}
+
 // Flag estensione EXIF
 $EXIF_AVAILABLE = extension_loaded('exif') || function_exists('exif_read_data');
 function get_exif_orientation($path){
