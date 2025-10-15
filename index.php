@@ -1439,16 +1439,34 @@ header { padding: 12px 16px; font-weight: 600; }
 .crumbs a { color: inherit; text-decoration: none; }
 .crumbs { font-weight:600; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 
-/* Responsive: su schermi stretti metti breadcrumb riga 1, titolo riga 2, menu a destra riga 1 */
+/* Responsive: su schermi stretti: titolo in alto a sinistra, menu in alto a destra, breadcrumbs sotto a sinistra */
 @media (max-width: 720px){
   .hdr{
-    grid-template-columns: 1fr auto;
-    grid-template-rows: auto auto;
+    grid-template-columns: auto 1fr auto; /* title | spacer | menu */
+    grid-template-rows: auto auto;       /* row1: title+menu, row2: breadcrumbs */
+    align-items: center;
   }
-  .hdr .crumbs{ grid-column:1 / -1; grid-row:1; }
-  .hdr .title{ grid-column:1 / -1; grid-row:2; margin-top:6px; }
-  .hdr .menu{ grid-column:2; grid-row:1; justify-self:end; }
+  /* Title top-left */
+  .hdr .title{
+    grid-column:1; grid-row:1;
+    margin:0;
+    justify-self:start;
+    text-align:left;
+    font-size:16px;
+  }
+  /* Menu top-right */
+  .hdr .menu{
+    grid-column:3; grid-row:1;
+    justify-self:end;
+  }
+  /* Breadcrumbs below, aligned left */
+  .hdr .crumbs{
+    grid-column:1 / -1; grid-row:2;
+    margin-top:6px;
+    justify-self:start;
+  }
 }
+
 .crumbs .sep { opacity:.6; }
 .grid {
   display: grid;
@@ -1456,6 +1474,16 @@ header { padding: 12px 16px; font-weight: 600; }
   padding: var(--gap);
   /*grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size), 1fr));*/
   grid-template-columns: repeat(auto-fill, minmax(calc(var(--thumb-size) * 1), 1fr));
+}
+/* Mobile: smaller thumbnails to fit more per screen */
+@media (max-width: 720px){
+  .grid{
+    /* reduce base cell width to ~66% of configured thumb size */
+    grid-template-columns: repeat(auto-fill, minmax(calc(var(--thumb-size) * 0.66), 1fr));
+    gap: 2px;
+    padding: 2px;
+  }
+  .card{ border-radius: 8px; }
 }
 #grid {
   gap: 2px;
